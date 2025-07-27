@@ -299,7 +299,7 @@ def start_birdnet_server():
     time.sleep(2)  # Give Flask time to start
     start_server(host="127.0.0.1", port=8080, threads=1)
 
-if __name__ == '__main__':
+def main():
     # Start BirdNET server in background thread
     birdnet_thread = threading.Thread(target=start_birdnet_server, daemon=True)
     birdnet_thread.start()
@@ -307,3 +307,6 @@ if __name__ == '__main__':
     # Start Flask web interface
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
+
+if __name__ == '__main__':
+    main()
