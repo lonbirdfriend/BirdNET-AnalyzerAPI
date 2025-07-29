@@ -1,6 +1,8 @@
-birdnet-analyzer==2.1.1
-flask
-requests
-bottle
-librosa
-tensorflow==2.15.1
+flask==3.0.0
+gunicorn==21.2.0
+birdnet-analyzer==1.0.0
+requests==2.31.0
+numpy==1.24.3
+scipy==1.11.1
+librosa==0.10.1
+bottle==0.12.25
