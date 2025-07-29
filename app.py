@@ -44,6 +44,7 @@ HTML_TEMPLATE = """
     <div class="container">
         <h1>🐦 BirdNET Vogelerkennung</h1>
         <p>Klicken Sie "Aufnahme starten", nehmen Sie 5-15 Sekunden Vogelgeräusche auf, dann "Stoppen".</p>
+        <p><small>⚠️ Beim ersten Request kann es 30-60 Sekunden dauern (Server erwacht aus Standby)</small></p>
         
         <button id="recordBtn" class="record disabled" disabled>🎤 Aufnahme starten</button>
         
@@ -203,7 +204,7 @@ HTML_TEMPLATE = """
                 status.textContent = 'Analysiere mit KI...';
                 console.log('📤 Sende Request an /analyze');
                 
-                // An Server senden
+                // An Server senden mit besserer Fehlerbehandlung
                 const response = await fetch('/analyze', {
                     method: 'POST',
                     body: formData
@@ -212,7 +213,9 @@ HTML_TEMPLATE = """
                 console.log('📥 Server Antwort:', response.status, response.statusText);
                 
                 if (!response.ok) {
-                    throw new Error(`Server Error: ${response.status}`);
+                    const errorText = await response.text();
+                    console.error('❌ Server Antwort Body:', errorText);
+                    throw new Error(`Server Error: ${response.status} - ${errorText}`);
                 }
                 
                 const data = await response.json();
@@ -228,9 +231,15 @@ HTML_TEMPLATE = """
             } catch (error) {
                 console.error('❌ Upload Fehler:', error);
                 status.textContent = 'Upload-Fehler: ' + error.message;
+                
+                // Detaillierte Fehlermeldung für Debugging
                 results.innerHTML = `<div style="color: red; padding: 10px; border: 1px solid red; border-radius: 5px;">
-                    Fehler beim Upload: ${error.message}<br>
-                    Bitte versuchen Sie es erneut.
+                    <strong>Debug Info:</strong><br>
+                    Fehler: ${error.message}<br>
+                    Audio-Größe: ${audioBlob.size} bytes<br>
+                    GPS: ${lat}, ${lon}<br>
+                    Zeit: ${new Date().toLocaleTimeString()}<br>
+                    <button onclick="location.reload()">Seite neu laden</button>
                 </div>`;
             }
         }
@@ -260,6 +269,16 @@ HTML_TEMPLATE = """
 
         // App starten
         initMicrophone();
+        
+        // Keep-Alive für Render (alle 5 Minuten pingen)
+        setInterval(async () => {
+            try {
+                await fetch('/health');
+                console.log('🏓 Keep-alive ping');
+            } catch (e) {
+                console.log('❌ Keep-alive failed');
+            }
+        }, 300000);  // 5 Minuten
     </script>
 </body>
 </html>
@@ -268,6 +287,82 @@ HTML_TEMPLATE = """
 @app.route('/')
 def index():
     return render_template_string(HTML_TEMPLATE)
+
+@app.route('/test-birdnet')
+def test_birdnet():
+    """Test BirdNET direkt wie im Beispiel"""
+    if not analyzer:
+        return jsonify({'error': 'Analyzer nicht verfügbar'})
+    
+    try:
+        # Teste mit einer kleinen WAV-Datei (Stille)
+        import numpy as np
+        import scipy.io.wavfile as wav
+        
+        # Erstelle 3 Sekunden Stille als Test-Audio
+        sample_rate = 44100
+        duration = 3  # Sekunden
+        samples = np.zeros((duration * sample_rate,), dtype=np.int16)
+        
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
+            wav.write(tmp.name, sample_rate, samples)
+            
+            print(f"🧪 Teste BirdNET mit: {tmp.name}")
+            
+            # Exakt wie im Beispiel
+            recording = Recording(
+                analyzer,
+                tmp.name,
+                lat=50.1109221,  # Frankfurt
+                lon=8.6821267,
+                date=datetime.now(),
+                min_conf=0.1,
+            )
+            
+            print("🤖 Starte recording.analyze()...")
+            recording.analyze()
+            print(f"✅ Analyse fertig: {len(recording.detections)} detections")
+            
+            # Cleanup
+            os.unlink(tmp.name)
+            
+            return jsonify({
+                'success': True,
+                'detections': len(recording.detections),
+                'message': 'BirdNET Test erfolgreich'
+            })
+            
+    except Exception as e:
+        print(f"❌ BirdNET Test Fehler: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)})
+
+@app.route('/test-upload', methods=['POST'])
+def test_upload():
+    """Test-Endpoint um Upload-Probleme zu debuggen"""
+    print("🧪 Test-Upload Request erhalten")
+    try:
+        files = list(request.files.keys())
+        form_data = list(request.form.keys())
+        
+        print(f"📁 Files: {files}")
+        print(f"📝 Form: {form_data}")
+        
+        if 'audio' in request.files:
+            audio = request.files['audio']
+            print(f"🎵 Audio: {audio.filename}, {len(audio.read())} bytes")
+            audio.seek(0)
+        
+        return jsonify({
+            'success': True,
+            'message': 'Test-Upload erfolgreich',
+            'files': files,
+            'form': form_data
+        })
+    except Exception as e:
+        print(f"❌ Test-Upload Fehler: {e}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/analyze', methods=['POST'])
 def analyze():
