@@ -1,595 +1,706 @@
 import os
-import json
-import requests
-from flask import Flask, render_template_string, request, jsonify
 import threading
 import time
-from birdnet_analyzer.network.server import start_server
+import tempfile
+import requests
+import json
+import subprocess
+from flask import Flask, render_template, request, jsonify, send_from_directory
+from werkzeug.utils import secure_filename
+import signal
+import sys
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
+app.config['UPLOAD_FOLDER'] = 'uploads'
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max
 
-# HTML Template mit Audio-Aufnahme
-HTML_TEMPLATE = '''
-<!DOCTYPE html>
-<html>
-<head>
-    <title>BirdNET Audio Analyzer</title>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-        body { 
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            max-width: 900px; 
-            margin: 0 auto; 
-            padding: 20px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-        }
-        .container {
-            background: white;
-            border-radius: 15px;
-            padding: 30px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
-        }
-        h1 { 
-            color: #2c3e50; 
-            text-align: center;
-            margin-bottom: 30px;
-        }
-        .tabs {
-            display: flex;
-            margin-bottom: 20px;
-            background: #f8f9fa;
-            border-radius: 10px;
-            padding: 5px;
-        }
-        .tab {
-            flex: 1;
-            padding: 12px 20px;
-            text-align: center;
-            cursor: pointer;
-            border-radius: 8px;
-            transition: all 0.3s ease;
-            font-weight: 500;
-        }
-        .tab.active {
-            background: #3498db;
-            color: white;
-        }
-        .tab:hover:not(.active) {
-            background: #e3f2fd;
-        }
-        .tab-content {
-            display: none;
-        }
-        .tab-content.active {
-            display: block;
-        }
-        .upload-area {
-            border: 3px dashed #3498db;
-            border-radius: 10px;
-            padding: 40px;
-            text-align: center;
-            margin: 20px 0;
-            transition: all 0.3s ease;
-            background: #f8f9fa;
-        }
-        .upload-area:hover {
-            border-color: #2980b9;
-            background: #e3f2fd;
-        }
-        .upload-area.dragover {
-            border-color: #27ae60;
-            background: #d5f4e6;
-        }
-        .record-area {
-            border: 3px solid #e74c3c;
-            border-radius: 10px;
-            padding: 40px;
-            text-align: center;
-            margin: 20px 0;
-            background: #f8f9fa;
-        }
-        .record-area.recording {
-            border-color: #e74c3c;
-            background: #ffebee;
-            animation: pulse 1.5s infinite;
-        }
-        @keyframes pulse {
-            0% { box-shadow: 0 0 0 0 rgba(231, 76, 60, 0.7); }
-            70% { box-shadow: 0 0 0 10px rgba(231, 76, 60, 0); }
-            100% { box-shadow: 0 0 0 0 rgba(231, 76, 60, 0); }
-        }
-        input[type="file"] {
-            display: none;
-        }
-        .btn {
-            color: white;
-            padding: 12px 24px;
-            border: none;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 16px;
-            transition: all 0.3s;
-            margin: 5px;
-        }
-        .btn-primary {
-            background: #3498db;
-        }
-        .btn-primary:hover {
-            background: #2980b9;
-        }
-        .btn-success {
-            background: #27ae60;
-        }
-        .btn-success:hover {
-            background: #219a52;
-        }
-        .btn-danger {
-            background: #e74c3c;
-        }
-        .btn-danger:hover {
-            background: #c0392b;
-        }
-        .btn-secondary {
-            background: #95a5a6;
-        }
-        .btn-secondary:hover {
-            background: #7f8c8d;
-        }
-        .btn:disabled {
-            background: #bdc3c7;
-            cursor: not-allowed;
-        }
-        .analyze-btn {
-            width: 100%;
-            margin-top: 20px;
-        }
-        .results {
-            margin-top: 30px;
-            padding: 20px;
-            background: #f8f9fa;
-            border-radius: 8px;
-        }
-        .bird-result {
-            padding: 15px;
-            margin: 10px 0;
-            background: white;
-            border-radius: 8px;
-            border-left: 4px solid #3498db;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        .bird-name {
-            font-weight: bold;
-            font-size: 18px;
-            color: #2c3e50;
-        }
-        .confidence {
-            color: #7f8c8d;
-            font-size: 14px;
-        }
-        .loading {
-            text-align: center;
-            padding: 20px;
-        }
-        .spinner {
-            border: 4px solid #f3f3f3;
-            border-top: 4px solid #3498db;
-            border-radius: 50%;
-            width: 40px;
-            height: 40px;
-            animation: spin 1s linear infinite;
-            margin: 0 auto;
-        }
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-        .file-info {
-            margin: 10px 0;
-            color: #666;
-        }
-        .record-controls {
-            margin: 20px 0;
-        }
-        .record-timer {
-            font-size: 24px;
-            font-weight: bold;
-            color: #e74c3c;
-            margin: 20px 0;
-        }
-        .audio-preview {
-            margin: 20px 0;
-            padding: 15px;
-            background: #e8f5e8;
-            border-radius: 8px;
-            border-left: 4px solid #27ae60;
-        }
-        .status-message {
-            padding: 10px;
-            border-radius: 5px;
-            margin: 10px 0;
-            text-align: center;
-        }
-        .status-warning {
-            background: #fff3cd;
-            color: #856404;
-            border: 1px solid #ffeaa7;
-        }
-        .status-error {
-            background: #f8d7da;
-            color: #721c24;
-            border: 1px solid #f5c6cb;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>🐦 BirdNET Audio Analyzer</h1>
+# Erstelle Upload-Ordner wenn nicht vorhanden
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+os.makedirs('static', exist_ok=True)
+
+# Global variable für BirdNET Server Process
+birdnet_server = None
+BIRDNET_HOST = '127.0.0.1'
+BIRDNET_PORT = 8080
+
+def start_birdnet_server():
+    """Startet den BirdNET Analyzer Server im Hintergrund"""
+    global birdnet_server
+    try:
+        # Starte BirdNET Server
+        birdnet_server = subprocess.Popen([
+            'python', '-m', 'birdnet_analyzer.server',
+            '--host', BIRDNET_HOST,
+            '--port', str(BIRDNET_PORT),
+            '--spath', app.config['UPLOAD_FOLDER'],
+            '--locale', 'de'
+        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         
-        <!-- Tab Navigation -->
-        <div class="tabs">
-            <div class="tab active" onclick="switchTab('upload')">📁 Upload File</div>
-            <div class="tab" onclick="switchTab('record')">🎙️ Record Audio</div>
-        </div>
+        # Warte bis Server bereit ist
+        for i in range(30):  # 30 Sekunden timeout
+            try:
+                response = requests.get(f'http://{BIRDNET_HOST}:{BIRDNET_PORT}', timeout=1)
+                if response.status_code == 200:
+                    print(f"BirdNET Server erfolgreich gestartet auf {BIRDNET_HOST}:{BIRDNET_PORT}")
+                    return True
+            except:
+                time.sleep(1)
+        
+        print("BirdNET Server konnte nicht gestartet werden")
+        return False
+        
+    except Exception as e:
+        print(f"Fehler beim Starten des BirdNET Servers: {e}")
+        return False
 
-        <!-- Upload Tab -->
-        <div id="upload-tab" class="tab-content active">
-            <form id="uploadForm" enctype="multipart/form-data">
-                <div class="upload-area" id="uploadArea">
-                    <p>📁 Drag & drop your audio file here or</p>
-                    <button type="button" class="btn btn-primary" onclick="document.getElementById('audioFile').click()">
-                        Choose Audio File
-                    </button>
-                    <input type="file" id="audioFile" name="audio" accept=".wav,.mp3,.flac,.ogg,.m4a">
-                    <div class="file-info" id="fileInfo"></div>
-                </div>
-                
-                <button type="submit" class="btn btn-success analyze-btn" id="analyzeBtn" disabled>
-                    🔍 Analyze Audio
-                </button>
-            </form>
-        </div>
+def stop_birdnet_server():
+    """Stoppt den BirdNET Server"""
+    global birdnet_server
+    if birdnet_server:
+        birdnet_server.terminate()
+        birdnet_server.wait()
+        birdnet_server = None
 
-        <!-- Record Tab -->
-        <div id="record-tab" class="tab-content">
-            <div class="record-area" id="recordArea">
-                <p>🎙️ Click the button below to start recording bird sounds</p>
-                <div class="record-controls">
-                    <button type="button" class="btn btn-danger" id="recordBtn" onclick="toggleRecording()">
-                        ● Start Recording
-                    </button>
-                    <button type="button" class="btn btn-secondary" id="stopBtn" onclick="stopRecording()" disabled>
-                        ⏹ Stop Recording
-                    </button>
-                </div>
-                <div class="record-timer" id="recordTimer" style="display: none;">00:00</div>
-                <div class="status-message status-warning" id="microphoneStatus" style="display: none;">
-                    Please allow microphone access to record audio.
-                </div>
-            </div>
-            
-            <div id="audioPreview" class="audio-preview" style="display: none;">
-                <h4>🎵 Recorded Audio Preview:</h4>
-                <audio id="recordedAudio" controls style="width: 100%; margin: 10px 0;"></audio>
-                <button type="button" class="btn btn-success analyze-btn" id="analyzeRecordingBtn" onclick="analyzeRecording()">
-                    🔍 Analyze Recording
-                </button>
-            </div>
-        </div>
+def signal_handler(sig, frame):
+    """Handler für sauberes Beenden"""
+    print("Beende BirdNET Server...")
+    stop_birdnet_server()
+    sys.exit(0)
 
-        <div id="loading" class="loading" style="display: none;">
-            <div class="spinner"></div>
-            <p>Analyzing audio... This may take a moment.</p>
-        </div>
-
-        <div id="results" class="results" style="display: none;">
-            <h3>🎵 Detection Results:</h3>
-            <div id="resultsList"></div>
-        </div>
-    </div>
-
-    <script>
-        let mediaRecorder;
-        let recordedChunks = [];
-        let recordingStartTime;
-        let recordingTimer;
-        let recordedBlob;
-
-        // Tab switching
-        function switchTab(tabName) {
-            // Hide all tabs
-            document.querySelectorAll('.tab-content').forEach(tab => {
-                tab.classList.remove('active');
-            });
-            document.querySelectorAll('.tab').forEach(tab => {
-                tab.classList.remove('active');
-            });
-            
-            // Show selected tab
-            document.getElementById(tabName + '-tab').classList.add('active');
-            event.target.classList.add('active');
-            
-            // Reset states
-            resetStates();
-        }
-
-        function resetStates() {
-            document.getElementById('results').style.display = 'none';
-            document.getElementById('loading').style.display = 'none';
-            if (mediaRecorder && mediaRecorder.state === 'recording') {
-                stopRecording();
-            }
-        }
-
-        // File upload functionality
-        const uploadArea = document.getElementById('uploadArea');
-        const fileInput = document.getElementById('audioFile');
-        const analyzeBtn = document.getElementById('analyzeBtn');
-        const fileInfo = document.getElementById('fileInfo');
-
-        uploadArea.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            uploadArea.classList.add('dragover');
-        });
-
-        uploadArea.addEventListener('dragleave', () => {
-            uploadArea.classList.remove('dragover');
-        });
-
-        uploadArea.addEventListener('drop', (e) => {
-            e.preventDefault();
-            uploadArea.classList.remove('dragover');
-            
-            const files = e.dataTransfer.files;
-            if (files.length > 0) {
-                fileInput.files = files;
-                handleFileSelect();
-            }
-        });
-
-        fileInput.addEventListener('change', handleFileSelect);
-
-        function handleFileSelect() {
-            const file = fileInput.files[0];
-            if (file) {
-                fileInfo.innerHTML = `Selected: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`;
-                analyzeBtn.disabled = false;
-            }
-        }
-
-        // Recording functionality
-        async function toggleRecording() {
-            if (!mediaRecorder || mediaRecorder.state === 'inactive') {
-                await startRecording();
-            }
-        }
-
-        async function startRecording() {
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({ 
-                    audio: {
-                        sampleRate: 44100,
-                        channelCount: 1,
-                        volume: 1.0
-                    }
-                });
-                
-                recordedChunks = [];
-                mediaRecorder = new MediaRecorder(stream, {
-                    mimeType: 'audio/webm;codecs=opus'
-                });
-                
-                mediaRecorder.ondataavailable = (event) => {
-                    if (event.data.size > 0) {
-                        recordedChunks.push(event.data);
-                    }
-                };
-                
-                mediaRecorder.onstop = () => {
-                    recordedBlob = new Blob(recordedChunks, { type: 'audio/webm' });
-                    const audioUrl = URL.createObjectURL(recordedBlob);
-                    const audioElement = document.getElementById('recordedAudio');
-                    audioElement.src = audioUrl;
-                    document.getElementById('audioPreview').style.display = 'block';
-                    
-                    // Clean up stream
-                    stream.getTracks().forEach(track => track.stop());
-                };
-                
-                mediaRecorder.start();
-                recordingStartTime = Date.now();
-                
-                // Update UI
-                document.getElementById('recordBtn').disabled = true;
-                document.getElementById('stopBtn').disabled = false;
-                document.getElementById('recordArea').classList.add('recording');
-                document.getElementById('recordTimer').style.display = 'block';
-                document.getElementById('microphoneStatus').style.display = 'none';
-                
-                // Start timer
-                recordingTimer = setInterval(updateTimer, 1000);
-                
-            } catch (error) {
-                console.error('Error accessing microphone:', error);
-                document.getElementById('microphoneStatus').style.display = 'block';
-                document.getElementById('microphoneStatus').innerHTML = 
-                    'Error accessing microphone. Please check your browser permissions.';
-                document.getElementById('microphoneStatus').className = 'status-message status-error';
-            }
-        }
-
-        function stopRecording() {
-            if (mediaRecorder && mediaRecorder.state === 'recording') {
-                mediaRecorder.stop();
-                clearInterval(recordingTimer);
-                
-                // Update UI
-                document.getElementById('recordBtn').disabled = false;
-                document.getElementById('stopBtn').disabled = true;
-                document.getElementById('recordArea').classList.remove('recording');
-                document.getElementById('recordTimer').style.display = 'none';
-                document.getElementById('recordBtn').innerHTML = '● Start Recording';
-            }
-        }
-
-        function updateTimer() {
-            const elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
-            const minutes = Math.floor(elapsed / 60);
-            const seconds = elapsed % 60;
-            document.getElementById('recordTimer').textContent = 
-                `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
-        }
-
-        // Analysis functions
-        document.getElementById('uploadForm').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            
-            const formData = new FormData();
-            const audioFile = fileInput.files[0];
-            
-            if (!audioFile) {
-                alert('Please select an audio file first!');
-                return;
-            }
-
-            await analyzeAudio(formData, audioFile);
-        });
-
-        async function analyzeRecording() {
-            if (!recordedBlob) {
-                alert('No recording available. Please record audio first!');
-                return;
-            }
-
-            const formData = new FormData();
-            formData.append('audio', recordedBlob, 'recording.webm');
-            
-            await analyzeAudio(formData);
-        }
-
-        async function analyzeAudio(formData, audioFile = null) {
-            if (audioFile) {
-                formData.append('audio', audioFile);
-            }
-            
-            formData.append('meta', JSON.stringify({
-                lat: -1,
-                lon: -1,
-                week: -1,
-                overlap: 0.0,
-                sensitivity: 1.0,
-                sf_thresh: 0.03,
-                pmode: "avg",
-                num_results: 10,
-                save: false
-            }));
-
-            // Show loading
-            document.getElementById('loading').style.display = 'block';
-            document.getElementById('results').style.display = 'none';
-            
-            // Disable analyze buttons
-            document.getElementById('analyzeBtn').disabled = true;
-            document.getElementById('analyzeRecordingBtn').disabled = true;
-
-            try {
-                const response = await fetch('/analyze', {
-                    method: 'POST',
-                    body: formData
-                });
-
-                const data = await response.json();
-                
-                // Hide loading
-                document.getElementById('loading').style.display = 'none';
-                
-                // Re-enable buttons
-                document.getElementById('analyzeBtn').disabled = false;
-                document.getElementById('analyzeRecordingBtn').disabled = false;
-
-                if (data.msg === 'success') {
-                    displayResults(data.results);
-                } else {
-                    alert('Error: ' + data.msg);
-                }
-            } catch (error) {
-                document.getElementById('loading').style.display = 'none';
-                document.getElementById('analyzeBtn').disabled = false;
-                document.getElementById('analyzeRecordingBtn').disabled = false;
-                alert('Error analyzing audio: ' + error.message);
-            }
-        }
-
-        function displayResults(results) {
-            const resultsList = document.getElementById('resultsList');
-            const resultsDiv = document.getElementById('results');
-            
-            if (results.length === 0) {
-                resultsList.innerHTML = '<p>No birds detected in this audio.</p>';
-            } else {
-                resultsList.innerHTML = results.map(([species, confidence]) => `
-                    <div class="bird-result">
-                        <div class="bird-name">${species.replace(/_/g, ' ')}</div>
-                        <div class="confidence">Confidence: ${(confidence * 100).toFixed(1)}%</div>
-                    </div>
-                `).join('');
-            }
-            
-            resultsDiv.style.display = 'block';
-        }
-    </script>
-</body>
-</html>
-'''
+# Signal Handler registrieren
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 @app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE)
+    """Hauptseite mit Audio-Recorder"""
+    return render_template('index.html')
 
 @app.route('/analyze', methods=['POST'])
-def analyze():
-    """Proxy request to BirdNET server"""
+def analyze_audio():
+    """Analysiert hochgeladene Audiodatei mit BirdNET"""
     try:
-        files = {'audio': request.files['audio']}
-        data = {'meta': request.form.get('meta', '{}')}
+        if 'audio' not in request.files:
+            return jsonify({'error': 'Keine Audiodatei gefunden'}), 400
         
-        # Forward to BirdNET server
-        response = requests.post('http://localhost:8080/analyze', files=files, data=data, timeout=60)
-        return response.json()
-    except requests.exceptions.ConnectionError:
-        return jsonify({'msg': 'BirdNET server is not ready yet. Please wait a moment and try again.'})
+        audio_file = request.files['audio']
+        if audio_file.filename == '':
+            return jsonify({'error': 'Keine Datei ausgewählt'}), 400
+        
+        # Standortdaten aus dem Request
+        lat = request.form.get('lat', -1)
+        lon = request.form.get('lon', -1)
+        
+        # Temporäre Datei speichern
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
+            audio_file.save(temp_file.name)
+            temp_filename = temp_file.name
+        
+        try:
+            # Metadata für BirdNET vorbereiten
+            metadata = {
+                'lat': float(lat) if lat != '-1' else -1,
+                'lon': float(lon) if lon != '-1' else -1,
+                'week': -1,  # Ganzjährig
+                'sensitivity': 1.0,
+                'overlap': 0,
+                'sf_thresh': 0.03
+            }
+            
+            # Audio-Datei lesen
+            with open(temp_filename, 'rb') as f:
+                audio_data = f.read()
+            
+            # Request an BirdNET Server senden
+            files = {'audio': ('recording.wav', audio_data, 'audio/wav')}
+            data = {'meta': json.dumps(metadata)}
+            
+            response = requests.post(
+                f'http://{BIRDNET_HOST}:{BIRDNET_PORT}',
+                files=files,
+                data=data,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                
+                if result.get('msg') == 'success':
+                    # Ergebnisse formatieren
+                    birds = []
+                    for bird_data in result.get('results', []):
+                        species_name = bird_data[0]
+                        confidence = bird_data[1]
+                        
+                        # Deutschen und wissenschaftlichen Namen trennen
+                        if '_' in species_name:
+                            scientific, common = species_name.split('_', 1)
+                        else:
+                            scientific = species_name
+                            common = species_name
+                        
+                        birds.append({
+                            'scientific_name': scientific,
+                            'common_name': common,
+                            'confidence': round(confidence * 100, 1)
+                        })
+                    
+                    return jsonify({
+                        'success': True,
+                        'birds': birds,
+                        'location_used': lat != '-1' and lon != '-1'
+                    })
+                else:
+                    return jsonify({'error': f'BirdNET Fehler: {result.get("msg", "Unbekannter Fehler")}'}), 500
+            else:
+                return jsonify({'error': f'Server Fehler: {response.status_code}'}), 500
+                
+        finally:
+            # Temporäre Datei löschen
+            try:
+                os.unlink(temp_filename)
+            except:
+                pass
+                
     except Exception as e:
-        return jsonify({'msg': f'Error: {str(e)}'})
+        print(f"Fehler bei der Analyse: {e}")
+        return jsonify({'error': f'Analyse-Fehler: {str(e)}'}), 500
 
 @app.route('/health')
 def health():
-    """Health check endpoint"""
+    """Health Check Endpoint für Render"""
     try:
-        response = requests.get('http://localhost:8080/healthcheck', timeout=5)
-        return jsonify({'status': 'healthy', 'birdnet_status': response.json()})
+        # Prüfe ob BirdNET Server läuft
+        response = requests.get(f'http://{BIRDNET_HOST}:{BIRDNET_PORT}', timeout=2)
+        return jsonify({'status': 'healthy', 'birdnet_server': 'running'})
     except:
-        return jsonify({'status': 'unhealthy', 'birdnet_status': 'not ready'})
+        return jsonify({'status': 'unhealthy', 'birdnet_server': 'not running'}), 503
 
-def start_birdnet_server():
-    """Start BirdNET server in background"""
-    print("Starting BirdNET server...")
-    time.sleep(3)  # Give Flask time to start
-    try:
-        start_server(host="127.0.0.1", port=8080, threads=1)
-    except Exception as e:
-        print(f"Error starting BirdNET server: {e}")
+@app.route('/static/<filename>')
+def static_files(filename):
+    """Statische Dateien servieren"""
+    return send_from_directory('static', filename)
 
-def main():
-    # Start BirdNET server in background thread
-    birdnet_thread = threading.Thread(target=start_birdnet_server, daemon=True)
-    birdnet_thread.start()
+def create_static_files():
+    """Erstellt notwendige statische Dateien"""
     
-    # Start Flask web interface
-    port = int(os.environ.get('PORT', 5000))
-    print(f"Starting Flask server on port {port}")
-    app.run(host='0.0.0.0', port=port, debug=False)
+    # JavaScript für Audio-Recording
+    recorder_js = """
+class AudioRecorder {
+    constructor() {
+        this.mediaRecorder = null;
+        this.audioChunks = [];
+        this.isRecording = false;
+    }
+
+    async initialize() {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            this.mediaRecorder = new MediaRecorder(stream, {
+                mimeType: 'audio/webm;codecs=opus'
+            });
+
+            this.mediaRecorder.ondataavailable = (event) => {
+                this.audioChunks.push(event.data);
+            };
+
+            this.mediaRecorder.onstop = () => {
+                const audioBlob = new Blob(this.audioChunks, { type: 'audio/webm' });
+                this.convertAndUpload(audioBlob);
+                this.audioChunks = [];
+            };
+
+            return true;
+        } catch (error) {
+            console.error('Fehler beim Zugriff auf Mikrofon:', error);
+            return false;
+        }
+    }
+
+    startRecording() {
+        if (this.mediaRecorder && !this.isRecording) {
+            this.audioChunks = [];
+            this.mediaRecorder.start();
+            this.isRecording = true;
+            return true;
+        }
+        return false;
+    }
+
+    stopRecording() {
+        if (this.mediaRecorder && this.isRecording) {
+            this.mediaRecorder.stop();
+            this.isRecording = false;
+            return true;
+        }
+        return false;
+    }
+
+    async convertAndUpload(audioBlob) {
+        try {
+            // Konvertiere zu WAV
+            const arrayBuffer = await audioBlob.arrayBuffer();
+            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+            
+            const wavBlob = this.audioBufferToWav(audioBuffer);
+            await this.uploadAudio(wavBlob);
+            
+        } catch (error) {
+            console.error('Fehler bei der Konvertierung:', error);
+            showError('Fehler bei der Audio-Verarbeitung');
+        }
+    }
+
+    audioBufferToWav(buffer) {
+        const numChannels = buffer.numberOfChannels;
+        const sampleRate = buffer.sampleRate;
+        const format = 1; // PCM
+        const bitDepth = 16;
+
+        const result = new ArrayBuffer(44 + buffer.length * numChannels * 2);
+        const view = new DataView(result);
+
+        // WAV Header schreiben
+        const writeString = (offset, string) => {
+            for (let i = 0; i < string.length; i++) {
+                view.setUint8(offset + i, string.charCodeAt(i));
+            }
+        };
+
+        let offset = 0;
+        writeString(offset, 'RIFF'); offset += 4;
+        view.setUint32(offset, 36 + buffer.length * numChannels * 2, true); offset += 4;
+        writeString(offset, 'WAVE'); offset += 4;
+        writeString(offset, 'fmt '); offset += 4;
+        view.setUint32(offset, 16, true); offset += 4;
+        view.setUint16(offset, format, true); offset += 2;
+        view.setUint16(offset, numChannels, true); offset += 2;
+        view.setUint32(offset, sampleRate, true); offset += 4;
+        view.setUint32(offset, sampleRate * numChannels * bitDepth / 8, true); offset += 4;
+        view.setUint16(offset, numChannels * bitDepth / 8, true); offset += 2;
+        view.setUint16(offset, bitDepth, true); offset += 2;
+        writeString(offset, 'data'); offset += 4;
+        view.setUint32(offset, buffer.length * numChannels * 2, true); offset += 4;
+
+        // Audio-Daten schreiben
+        const channels = [];
+        for (let i = 0; i < numChannels; i++) {
+            channels.push(buffer.getChannelData(i));
+        }
+
+        let sampleIndex = 0;
+        while (sampleIndex < buffer.length) {
+            for (let channel = 0; channel < numChannels; channel++) {
+                const sample = Math.max(-1, Math.min(1, channels[channel][sampleIndex]));
+                view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
+                offset += 2;
+            }
+            sampleIndex++;
+        }
+
+        return new Blob([result], { type: 'audio/wav' });
+    }
+
+    async uploadAudio(audioBlob) {
+        const formData = new FormData();
+        formData.append('audio', audioBlob, 'recording.wav');
+        
+        // Standortdaten hinzufügen falls verfügbar
+        const location = await getCurrentLocation();
+        formData.append('lat', location.lat);
+        formData.append('lon', location.lon);
+
+        showLoading(true);
+
+        try {
+            const response = await fetch('/analyze', {
+                method: 'POST',
+                body: formData
+            });
+
+            const result = await response.json();
+            
+            if (result.success) {
+                displayResults(result.birds, result.location_used);
+            } else {
+                showError(result.error || 'Unbekannter Fehler');
+            }
+        } catch (error) {
+            console.error('Upload-Fehler:', error);
+            showError('Fehler beim Hochladen der Audiodatei');
+        } finally {
+            showLoading(false);
+        }
+    }
+}
+
+async function getCurrentLocation() {
+    return new Promise((resolve) => {
+        if ('geolocation' in navigator) {
+            navigator.geolocation.getCurrentPosition(
+                (position) => {
+                    resolve({
+                        lat: position.coords.latitude,
+                        lon: position.coords.longitude
+                    });
+                },
+                () => {
+                    resolve({ lat: -1, lon: -1 });
+                },
+                { timeout: 5000 }
+            );
+        } else {
+            resolve({ lat: -1, lon: -1 });
+        }
+    });
+}
+
+function showLoading(show) {
+    const loading = document.getElementById('loading');
+    const results = document.getElementById('results');
+    
+    if (show) {
+        loading.style.display = 'block';
+        results.style.display = 'none';
+    } else {
+        loading.style.display = 'none';
+    }
+}
+
+function showError(message) {
+    const results = document.getElementById('results');
+    results.innerHTML = `<div class="error">❌ ${message}</div>`;
+    results.style.display = 'block';
+}
+
+function displayResults(birds, locationUsed) {
+    const results = document.getElementById('results');
+    
+    if (!birds || birds.length === 0) {
+        results.innerHTML = '<div class="no-results">🔍 Keine Vögel erkannt</div>';
+    } else {
+        let html = '<h3>🐦 Erkannte Vögel:</h3>';
+        
+        if (locationUsed) {
+            html += '<div class="location-info">📍 Standortdaten wurden für bessere Genauigkeit verwendet</div>';
+        }
+        
+        html += '<div class="bird-list">';
+        birds.forEach(bird => {
+            const confidenceColor = bird.confidence > 70 ? '#4CAF50' : bird.confidence > 40 ? '#FF9800' : '#f44336';
+            html += `
+                <div class="bird-item">
+                    <div class="bird-name">
+                        <strong>${bird.common_name}</strong>
+                        <div class="scientific-name">${bird.scientific_name}</div>
+                    </div>
+                    <div class="confidence" style="color: ${confidenceColor}">
+                        ${bird.confidence}%
+                    </div>
+                </div>
+            `;
+        });
+        html += '</div>';
+        
+        results.innerHTML = html;
+    }
+    
+    results.style.display = 'block';
+}
+
+// Globale Variablen
+let recorder = null;
+let recordButton = null;
+
+// Initialisierung
+document.addEventListener('DOMContentLoaded', async function() {
+    recordButton = document.getElementById('recordButton');
+    recorder = new AudioRecorder();
+    
+    const initialized = await recorder.initialize();
+    if (!initialized) {
+        showError('Mikrofon-Zugriff nicht möglich. Bitte erlauben Sie den Zugriff auf das Mikrofon.');
+        recordButton.disabled = true;
+        return;
+    }
+
+    recordButton.addEventListener('click', function() {
+        if (recorder.isRecording) {
+            recorder.stopRecording();
+            recordButton.textContent = '🎤 Aufnahme starten';
+            recordButton.classList.remove('recording');
+        } else {
+            if (recorder.startRecording()) {
+                recordButton.textContent = '⏹️ Aufnahme beenden';
+                recordButton.classList.add('recording');
+                
+                // Verstecke vorherige Ergebnisse
+                document.getElementById('results').style.display = 'none';
+            }
+        }
+    });
+});
+"""
+    
+    with open('static/recorder.js', 'w', encoding='utf-8') as f:
+        f.write(recorder_js)
+
+    # CSS Styling
+    css_content = """
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 20px;
+    background-color: #f5f5f5;
+    color: #333;
+}
+
+.container {
+    background: white;
+    border-radius: 12px;
+    padding: 30px;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+h1 {
+    text-align: center;
+    color: #2c3e50;
+    margin-bottom: 30px;
+}
+
+.recorder-section {
+    text-align: center;
+    margin-bottom: 30px;
+}
+
+#recordButton {
+    background: linear-gradient(45deg, #4CAF50, #45a049);
+    color: white;
+    border: none;
+    padding: 15px 30px;
+    font-size: 16px;
+    border-radius: 25px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+}
+
+#recordButton:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
+}
+
+#recordButton.recording {
+    background: linear-gradient(45deg, #f44336, #da190b);
+    animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+    0% { transform: scale(1); }
+    50% { transform: scale(1.05); }
+    100% { transform: scale(1); }
+}
+
+.instructions {
+    background: #e3f2fd;
+    padding: 20px;
+    border-radius: 8px;
+    margin: 20px 0;
+    border-left: 4px solid #2196F3;
+}
+
+.instructions h3 {
+    margin-top: 0;
+    color: #1976D2;
+}
+
+.instructions ul {
+    margin: 10px 0;
+    padding-left: 20px;
+}
+
+.instructions li {
+    margin: 5px 0;
+}
+
+#loading {
+    text-align: center;
+    padding: 20px;
+    font-size: 18px;
+    color: #666;
+    display: none;
+}
+
+#results {
+    margin-top: 20px;
+    display: none;
+}
+
+.error {
+    background: #ffebee;
+    color: #c62828;
+    padding: 15px;
+    border-radius: 8px;
+    border-left: 4px solid #f44336;
+}
+
+.no-results {
+    background: #fff3e0;
+    color: #e65100;
+    padding: 15px;
+    border-radius: 8px;
+    text-align: center;
+    border-left: 4px solid #ff9800;
+}
+
+.location-info {
+    background: #e8f5e8;
+    color: #2e7d32;
+    padding: 10px;
+    border-radius: 6px;
+    margin-bottom: 15px;
+    font-size: 14px;
+    border-left: 4px solid #4caf50;
+}
+
+.bird-list {
+    space-y: 10px;
+}
+
+.bird-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 15px;
+    background: #fafafa;
+    border-radius: 8px;
+    margin-bottom: 10px;
+    border: 1px solid #e0e0e0;
+    transition: all 0.2s ease;
+}
+
+.bird-item:hover {
+    background: #f0f0f0;
+    border-color: #d0d0d0;
+}
+
+.bird-name strong {
+    color: #2c3e50;
+    font-size: 16px;
+}
+
+.scientific-name {
+    color: #666;
+    font-style: italic;
+    font-size: 14px;
+    margin-top: 2px;
+}
+
+.confidence {
+    font-weight: bold;
+    font-size: 16px;
+    padding: 5px 10px;
+    border-radius: 15px;
+    background: rgba(255, 255, 255, 0.8);
+}
+
+.footer {
+    text-align: center;
+    margin-top: 30px;
+    padding-top: 20px;
+    border-top: 1px solid #eee;
+    color: #666;
+    font-size: 14px;
+}
+
+@media (max-width: 600px) {
+    body {
+        padding: 10px;
+    }
+    
+    .container {
+        padding: 20px;
+    }
+    
+    .bird-item {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 10px;
+    }
+    
+    .confidence {
+        align-self: flex-end;
+    }
+}
+"""
+    
+    with open('static/styles.css', 'w', encoding='utf-8') as f:
+        f.write(css_content)
+
+# HTML Template erstellen
+def create_template():
+    os.makedirs('templates', exist_ok=True)
+    
+    html_template = """<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BirdNET - Vogelerkennung</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="container">
+        <h1>🐦 BirdNET Vogelerkennung</h1>
+        
+        <div class="instructions">
+            <h3>📋 Anleitung:</h3>
+            <ul>
+                <li>Klicken Sie auf "Aufnahme starten" um eine Audioaufnahme zu beginnen</li>
+                <li>Halten Sie das Gerät in Richtung der Vogelgeräusche</li>
+                <li>Klicken Sie auf "Aufnahme beenden" wenn Sie fertig sind</li>
+                <li>Die Analyse erfolgt automatisch und zeigt erkannte Vogelarten an</li>
+                <li>Für bessere Ergebnisse erlauben Sie den Zugriff auf Ihren Standort</li>
+            </ul>
+        </div>
+
+        <div class="recorder-section">
+            <button id="recordButton">🎤 Aufnahme starten</button>
+        </div>
+
+        <div id="loading">
+            <div>🔄 Analysiere Audioaufnahme...</div>
+            <div style="margin-top: 10px; font-size: 14px;">Dies kann einen Moment dauern</div>
+        </div>
+
+        <div id="results"></div>
+
+        <div class="footer">
+            <p>Powered by <strong>BirdNET</strong> - Cornell Lab of Ornithology & Chemnitz University of Technology</p>
+            <p>Diese App nutzt maschinelles Lernen zur Erkennung von Vogelgeräuschen</p>
+        </div>
+    </div>
+
+    <script src="/static/recorder.js"></script>
+</body>
+</html>"""
+    
+    with open('templates/index.html', 'w', encoding='utf-8') as f:
+        f.write(html_template)
 
 if __name__ == '__main__':
-    main()
+    # Erstelle statische Dateien und Templates
+    create_static_files()
+    create_template()
+    
+    # Starte BirdNET Server
+    print("Starte BirdNET Server...")
+    if not start_birdnet_server():
+        print("FEHLER: BirdNET Server konnte nicht gestartet werden!")
+        sys.exit(1)
+    
+    # Starte Flask App
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port, debug=False)
