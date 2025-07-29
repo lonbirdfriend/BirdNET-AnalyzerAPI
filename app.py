@@ -249,7 +249,7 @@ h1 {
     font-weight: bold;
 }
 
-#recordButton:hover {
+#recordButton:hover:not(:disabled) {
     transform: translateY(-3px);
     box-shadow: 0 12px 20px rgba(0, 184, 148, 0.4);
 }
@@ -264,6 +264,7 @@ h1 {
     cursor: not-allowed;
     transform: none;
     box-shadow: none;
+    opacity: 0.6;
 }
 
 @keyframes pulse {
@@ -294,6 +295,18 @@ h1 {
 .instructions li {
     margin: 8px 0;
     line-height: 1.4;
+}
+
+.debug-info {
+    background: #f8f9fa;
+    border: 1px solid #dee2e6;
+    border-radius: 8px;
+    padding: 15px;
+    margin: 20px 0;
+    font-family: monospace;
+    font-size: 12px;
+    max-height: 200px;
+    overflow-y: auto;
 }
 
 #loading {
@@ -425,18 +438,36 @@ h1 {
     with open('static/styles.css', 'w', encoding='utf-8') as f:
         f.write(css_content)
 
-    # JavaScript
+    # JavaScript - KOMPLETT NEU
     js_content = """
+// Debug-Logging
+function debugLog(message) {
+    console.log('[BIRDNET]', message);
+    const debugDiv = document.getElementById('debug-info');
+    if (debugDiv) {
+        debugDiv.innerHTML += message + '\\n';
+        debugDiv.scrollTop = debugDiv.scrollHeight;
+    }
+}
+
 class AudioRecorder {
     constructor() {
         this.mediaRecorder = null;
         this.audioChunks = [];
         this.isRecording = false;
         this.stream = null;
+        debugLog('AudioRecorder erstellt');
     }
 
     async initialize() {
+        debugLog('Initialisiere Mikrofon...');
         try {
+            // Check if getUserMedia is available
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                debugLog('FEHLER: getUserMedia nicht verfügbar');
+                return false;
+            }
+
             this.stream = await navigator.mediaDevices.getUserMedia({ 
                 audio: {
                     echoCancellation: true,
@@ -445,50 +476,78 @@ class AudioRecorder {
                 } 
             });
             
+            debugLog('Mikrofon-Stream erhalten');
+            
+            // Check MediaRecorder support
+            if (!window.MediaRecorder) {
+                debugLog('FEHLER: MediaRecorder nicht verfügbar');
+                return false;
+            }
+
             this.mediaRecorder = new MediaRecorder(this.stream, {
-                mimeType: 'audio/webm;codecs=opus'
+                mimeType: MediaRecorder.isTypeSupported('audio/webm;codecs=opus') 
+                    ? 'audio/webm;codecs=opus' 
+                    : 'audio/webm'
             });
 
+            debugLog('MediaRecorder erstellt');
+
             this.mediaRecorder.ondataavailable = (event) => {
+                debugLog(`Audio-Chunk erhalten: ${event.data.size} bytes`);
                 if (event.data.size > 0) {
                     this.audioChunks.push(event.data);
                 }
             };
 
             this.mediaRecorder.onstop = () => {
+                debugLog('Aufnahme gestoppt, verarbeite Audio...');
                 const audioBlob = new Blob(this.audioChunks, { type: 'audio/webm' });
+                debugLog(`Audio-Blob erstellt: ${audioBlob.size} bytes`);
                 this.convertAndUpload(audioBlob);
                 this.audioChunks = [];
             };
 
+            this.mediaRecorder.onerror = (event) => {
+                debugLog('MediaRecorder Fehler: ' + event.error);
+            };
+
+            debugLog('✅ Mikrofon erfolgreich initialisiert');
             return true;
+            
         } catch (error) {
-            console.error('Mikrofon-Fehler:', error);
+            debugLog('❌ Mikrofon-Fehler: ' + error.message);
             return false;
         }
     }
 
     startRecording() {
-        if (this.mediaRecorder && !this.isRecording) {
+        debugLog('Starte Aufnahme...');
+        if (this.mediaRecorder && this.mediaRecorder.state === 'inactive') {
             this.audioChunks = [];
             this.mediaRecorder.start(100); // Sammle Daten alle 100ms
             this.isRecording = true;
+            debugLog('✅ Aufnahme gestartet');
             return true;
         }
+        debugLog('❌ Kann Aufnahme nicht starten');
         return false;
     }
 
     stopRecording() {
-        if (this.mediaRecorder && this.isRecording) {
+        debugLog('Stoppe Aufnahme...');
+        if (this.mediaRecorder && this.mediaRecorder.state === 'recording') {
             this.mediaRecorder.stop();
             this.isRecording = false;
+            debugLog('✅ Aufnahme gestoppt');
             return true;
         }
+        debugLog('❌ Kann Aufnahme nicht stoppen');
         return false;
     }
 
     async convertAndUpload(audioBlob) {
         try {
+            debugLog('Konvertiere zu WAV...');
             showLoading(true);
             
             // Konvertiere zu WAV
@@ -496,11 +555,15 @@ class AudioRecorder {
             const audioContext = new (window.AudioContext || window.webkitAudioContext)();
             const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
             
+            debugLog(`Audio decodiert: ${audioBuffer.duration}s, ${audioBuffer.sampleRate}Hz`);
+            
             const wavBlob = this.audioBufferToWav(audioBuffer);
+            debugLog(`WAV erstellt: ${wavBlob.size} bytes`);
+            
             await this.uploadAudio(wavBlob);
             
         } catch (error) {
-            console.error('Konvertierung fehlgeschlagen:', error);
+            debugLog('❌ Konvertierung fehlgeschlagen: ' + error.message);
             showError('Fehler bei der Audio-Verarbeitung: ' + error.message);
             showLoading(false);
         }
@@ -555,12 +618,16 @@ class AudioRecorder {
     }
 
     async uploadAudio(audioBlob) {
+        debugLog('Lade Audio hoch...');
+        
         const formData = new FormData();
         formData.append('audio', audioBlob, 'recording.wav');
         
         const location = await getCurrentLocation();
         formData.append('lat', location.lat);
         formData.append('lon', location.lon);
+        
+        debugLog(`Upload mit GPS: ${location.lat}, ${location.lon}`);
 
         try {
             const response = await fetch('/analyze', {
@@ -568,15 +635,18 @@ class AudioRecorder {
                 body: formData
             });
 
+            debugLog(`Server Antwort: ${response.status}`);
+            
             const result = await response.json();
+            debugLog('Analyse-Ergebnis erhalten');
             
             if (result.success) {
                 displayResults(result.birds, result.location_used, result.total_detections, result.message);
             } else {
-                showError(result.error || 'Unbekannter Fehler');
+                showError(result.error || 'Unbekannter Server-Fehler');
             }
         } catch (error) {
-            console.error('Upload-Fehler:', error);
+            debugLog('❌ Upload-Fehler: ' + error.message);
             showError('Netzwerk-Fehler: ' + error.message);
         } finally {
             showLoading(false);
@@ -585,19 +655,25 @@ class AudioRecorder {
 }
 
 async function getCurrentLocation() {
+    debugLog('Versuche GPS-Position zu ermitteln...');
     return new Promise((resolve) => {
         if ('geolocation' in navigator) {
             navigator.geolocation.getCurrentPosition(
                 (position) => {
+                    debugLog(`GPS erhalten: ${position.coords.latitude}, ${position.coords.longitude}`);
                     resolve({
                         lat: position.coords.latitude,
                         lon: position.coords.longitude
                     });
                 },
-                () => resolve({ lat: -1, lon: -1 }),
+                (error) => {
+                    debugLog('GPS-Fehler: ' + error.message);
+                    resolve({ lat: -1, lon: -1 });
+                },
                 { timeout: 5000, enableHighAccuracy: true }
             );
         } else {
+            debugLog('GPS nicht verfügbar');
             resolve({ lat: -1, lon: -1 });
         }
     });
@@ -666,66 +742,89 @@ function displayResults(birds, locationUsed, totalDetections, message) {
 let recorder = null;
 let recordButton = null;
 
-// Initialisierung
+// Initialisierung - KOMPLETT NEU
 document.addEventListener('DOMContentLoaded', async function() {
-    console.log('🚀 Starte JavaScript Initialisierung...');
+    debugLog('🚀 DOM geladen, starte Initialisierung...');
     
     recordButton = document.getElementById('recordButton');
     const statusDiv = document.getElementById('status');
     
     if (!recordButton) {
-        console.error('❌ Record Button nicht gefunden!');
+        debugLog('❌ KRITISCHER FEHLER: Record Button nicht gefunden!');
         return;
     }
     
-    console.log('🔍 Button gefunden, überprüfe Server-Status...');
+    debugLog('✅ Record Button gefunden');
     
-    // Überprüfe Server-Status
+    // Server-Status prüfen
+    debugLog('Prüfe Server-Status...');
     try {
         const response = await fetch('/health');
         const health = await response.json();
         
-        console.log('📊 Server Health:', health);
+        debugLog(`Server-Status: ${JSON.stringify(health)}`);
         
         if (health.birdnet_available) {
             statusDiv.innerHTML = '✅ BirdNET bereit für Analysen';
             statusDiv.className = 'status ready';
-            console.log('✅ BirdNET ist verfügbar');
+            debugLog('✅ BirdNET ist bereit');
         } else {
             statusDiv.innerHTML = '⚠️ BirdNET wird geladen, bitte warten...';
             statusDiv.className = 'status loading';
             recordButton.disabled = true;
-            console.log('⚠️ BirdNET lädt noch');
+            debugLog('⚠️ BirdNET lädt noch');
+            return;
         }
     } catch (error) {
+        debugLog('❌ Server nicht erreichbar: ' + error.message);
         statusDiv.innerHTML = '❌ Server nicht erreichbar';
         statusDiv.className = 'status error';
         recordButton.disabled = true;
+        return;
     }
     
-    // Mikrofon initialisieren
+    // Audio-Recorder initialisieren
+    debugLog('Initialisiere Audio-Recorder...');
     recorder = new AudioRecorder();
+    
     const initialized = await recorder.initialize();
     
     if (!initialized) {
-        showError('Mikrofon-Zugriff nicht möglich. Bitte erlauben Sie den Zugriff.');
+        debugLog('❌ Mikrofon-Initialisierung fehlgeschlagen');
+        showError('Mikrofon-Zugriff nicht möglich. Bitte erlauben Sie den Zugriff auf das Mikrofon.');
+        statusDiv.innerHTML = '❌ Mikrofon-Zugriff verweigert';
+        statusDiv.className = 'status error';
         recordButton.disabled = true;
         return;
     }
-
+    
+    // Button aktivieren
+    recordButton.disabled = false;
+    debugLog('✅ Button aktiviert - System bereit!');
+    
+    // Button Event Listener
     recordButton.addEventListener('click', function() {
+        debugLog(`Button geklickt - Recording: ${recorder.isRecording}`);
+        
         if (recorder.isRecording) {
-            recorder.stopRecording();
-            recordButton.textContent = '🎤 Aufnahme starten';
-            recordButton.classList.remove('recording');
-            document.getElementById('results').style.display = 'none';
+            // Aufnahme stoppen
+            if (recorder.stopRecording()) {
+                recordButton.textContent = '🎤 Aufnahme starten';
+                recordButton.classList.remove('recording');
+                debugLog('UI: Button auf "starten" gesetzt');
+            }
         } else {
+            // Aufnahme starten
             if (recorder.startRecording()) {
                 recordButton.textContent = '⏹️ Aufnahme beenden';
                 recordButton.classList.add('recording');
+                document.getElementById('results').style.display = 'none';
+                debugLog('UI: Button auf "stoppen" gesetzt');
             }
         }
     });
+    
+    debugLog('🎉 Initialisierung abgeschlossen!');
 });
 """
     
@@ -776,32 +875,20 @@ def create_template():
 
         <div id="results"></div>
 
+        <div class="debug-info" id="debug-info" style="display: none;">
+            <strong>Debug-Log:</strong><br>
+        </div>
+
         <div class="footer">
             <p><strong>🧠 Powered by BirdNET</strong></p>
             <p>Cornell Lab of Ornithology & Chemnitz University of Technology</p>
             <p>Erkennt über 6.000 Vogelarten weltweit mit Künstlicher Intelligenz</p>
+            <button onclick="document.getElementById('debug-info').style.display = document.getElementById('debug-info').style.display === 'none' ? 'block' : 'none'">
+                🐛 Debug-Logs anzeigen
+            </button>
         </div>
     </div>
 
     <script src="/static/recorder.js"></script>
 </body>
 </html>"""
-    
-    with open('templates/index.html', 'w', encoding='utf-8') as f:
-        f.write(html_template)
-
-if __name__ == '__main__':
-    print("🚀 Starte BirdNET Web-App...")
-    
-    # Erstelle statische Dateien
-    create_static_files()
-    create_template()
-    
-    # Initialisiere BirdNET im Hintergrund
-    print("🔄 Initialisiere BirdNET...")
-    initialize_birdnet()
-    
-    # Starte Flask App
-    port = int(os.environ.get('PORT', 10000))
-    print(f"🌐 Server startet auf Port {port}")
-    app.run(host='0.0.0.0', port=port, debug=False)
