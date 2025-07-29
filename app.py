@@ -668,21 +668,34 @@ let recordButton = null;
 
 // Initialisierung
 document.addEventListener('DOMContentLoaded', async function() {
+    console.log('🚀 Starte JavaScript Initialisierung...');
+    
     recordButton = document.getElementById('recordButton');
     const statusDiv = document.getElementById('status');
+    
+    if (!recordButton) {
+        console.error('❌ Record Button nicht gefunden!');
+        return;
+    }
+    
+    console.log('🔍 Button gefunden, überprüfe Server-Status...');
     
     // Überprüfe Server-Status
     try {
         const response = await fetch('/health');
         const health = await response.json();
         
+        console.log('📊 Server Health:', health);
+        
         if (health.birdnet_available) {
             statusDiv.innerHTML = '✅ BirdNET bereit für Analysen';
             statusDiv.className = 'status ready';
+            console.log('✅ BirdNET ist verfügbar');
         } else {
             statusDiv.innerHTML = '⚠️ BirdNET wird geladen, bitte warten...';
             statusDiv.className = 'status loading';
             recordButton.disabled = true;
+            console.log('⚠️ BirdNET lädt noch');
         }
     } catch (error) {
         statusDiv.innerHTML = '❌ Server nicht erreichbar';
