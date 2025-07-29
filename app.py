@@ -16,20 +16,24 @@ os.makedirs('static', exist_ok=True)
 
 # BirdNET Model laden
 try:
-    from birdnet.models import ModelV2M4
-    model = ModelV2M4()
+    from birdnetlib import Recording
+    from birdnetlib.analyzer import Analyzer
+    from datetime import datetime
+    
+    # BirdNET Analyzer initialisieren
+    analyzer = Analyzer()
     BIRDNET_AVAILABLE = True
-    print("BirdNET Model erfolgreich geladen")
+    print("BirdNET Analyzer erfolgreich geladen")
 except ImportError as e:
     print(f"BirdNET Import Fehler: {e}")
     BIRDNET_AVAILABLE = False
-    model = None
+    analyzer = None
 
 @app.route('/analyze', methods=['POST'])
 def analyze_audio():
     """Analysiert hochgeladene Audiodatei mit BirdNET"""
-    if not BIRDNET_AVAILABLE or model is None:
-        return jsonify({'error': 'BirdNET Model nicht verfügbar'}), 500
+    if not BIRDNET_AVAILABLE or analyzer is None:
+        return jsonify({'error': 'BirdNET Analyzer nicht verfügbar'}), 500
     
     try:
         if 'audio' not in request.files:
@@ -49,66 +53,55 @@ def analyze_audio():
             temp_filename = temp_file.name
         
         try:
-            # Audio-Datei analysieren
-            audio_path = Path(temp_filename)
+            # Recording-Objekt erstellen
+            recording_kwargs = {
+                'min_conf': 0.25  # Mindestkonfidenzniveau
+            }
             
-            # Spezies für Standort vorhersagen (falls Koordinaten verfügbar)
-            species_filter = None
+            # Standortdaten hinzufügen falls verfügbar
             if lat != -1 and lon != -1:
-                try:
-                    # Aktuelle Woche berechnen (ungefähr)
-                    import datetime
-                    week = datetime.datetime.now().isocalendar()[1] // 4 + 1
-                    week = min(48, max(1, week))  # BirdNET verwendet 1-48
-                    
-                    species_in_area = model.predict_species_at_location_and_time(lat, lon, week=week)
-                    species_filter = set(species_in_area.keys()) if species_in_area else None
-                    print(f"Gefiltert nach {len(species_filter) if species_filter else 0} lokalen Arten")
-                except Exception as e:
-                    print(f"Standortfilter Fehler: {e}")
-                    species_filter = None
+                recording_kwargs['lat'] = lat
+                recording_kwargs['lon'] = lon
+                recording_kwargs['date'] = datetime.now()
+                print(f"Analyse mit Standortdaten: {lat}, {lon}")
             
-            # Audio analysieren
-            if species_filter:
-                predictions = model.predict_species_within_audio_file(
-                    audio_path,
-                    filter_species=species_filter
-                )
-            else:
-                predictions = model.predict_species_within_audio_file(audio_path)
+            # BirdNET Recording erstellen und analysieren
+            recording = Recording(
+                analyzer,
+                temp_filename,
+                **recording_kwargs
+            )
+            
+            # Analyse durchführen
+            recording.analyze()
             
             # Ergebnisse verarbeiten
             birds = []
-            for time_interval, species_predictions in predictions.items():
-                for species_name, confidence in species_predictions.items():
-                    if confidence > 0.1:  # Mindestkonfidenzniveau
-                        # Namen aufteilen (wissenschaftlich_deutscher Name)
-                        if '_' in species_name:
-                            scientific, common = species_name.split('_', 1)
-                        else:
-                            scientific = species_name
-                            common = species_name
-                        
-                        # Prüfen ob Vogel schon in Liste
-                        existing_bird = next((b for b in birds if b['scientific_name'] == scientific), None)
-                        if existing_bird:
-                            # Höhere Konfidenz behalten
-                            if confidence > existing_bird['confidence'] / 100:
-                                existing_bird['confidence'] = round(confidence * 100, 1)
-                        else:
-                            birds.append({
-                                'scientific_name': scientific,
-                                'common_name': common,
-                                'confidence': round(confidence * 100, 1)
-                            })
+            for detection in recording.detections:
+                birds.append({
+                    'scientific_name': detection['scientific_name'],
+                    'common_name': detection['common_name'],
+                    'confidence': round(detection['confidence'] * 100, 1),
+                    'start_time': detection.get('start_time', 0),
+                    'end_time': detection.get('end_time', 0)
+                })
             
             # Nach Konfidenz sortieren
             birds.sort(key=lambda x: x['confidence'], reverse=True)
             
+            # Doppelte Arten entfernen (höchste Konfidenz behalten)
+            unique_birds = []
+            seen_species = set()
+            for bird in birds:
+                if bird['scientific_name'] not in seen_species:
+                    unique_birds.append(bird)
+                    seen_species.add(bird['scientific_name'])
+            
             return jsonify({
                 'success': True,
-                'birds': birds[:10],  # Top 10 Ergebnisse
-                'location_used': lat != -1 and lon != -1
+                'birds': unique_birds[:10],  # Top 10 Ergebnisse
+                'location_used': lat != -1 and lon != -1,
+                'total_detections': len(recording.detections)
             })
                 
         finally:
