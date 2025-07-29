@@ -30,62 +30,90 @@ def start_birdnet_server():
         print("Versuche BirdNET Server zu starten...")
         
         # Teste erst ob birdnet_analyzer verfügbar ist
+        print("Teste BirdNET-Analyzer Import...")
         test_result = subprocess.run([
-            'python', '-c', 'import birdnet_analyzer; print("BirdNET Analyzer gefunden")'
-        ], capture_output=True, text=True, timeout=10)
+            'python', '-c', 'import birdnet_analyzer; print("✓ BirdNET Analyzer erfolgreich importiert")'
+        ], capture_output=True, text=True, timeout=15)
         
         if test_result.returncode != 0:
-            print(f"BirdNET Analyzer Import-Fehler: {test_result.stderr}")
+            print(f"❌ BirdNET Analyzer Import-Fehler:")
+            print(f"STDOUT: {test_result.stdout}")
+            print(f"STDERR: {test_result.stderr}")
             return False
         
         print(test_result.stdout.strip())
         
-        # Starte BirdNET Server mit erweiterten Logs
+        # Teste BirdNET Server Kommando
+        print("Teste BirdNET Server Kommando...")
+        cmd_test = subprocess.run([
+            'python', '-m', 'birdnet_analyzer.server', '--help'
+        ], capture_output=True, text=True, timeout=10)
+        
+        if cmd_test.returncode != 0:
+            print(f"❌ BirdNET Server Kommando nicht verfügbar:")
+            print(f"STDERR: {cmd_test.stderr}")
+            return False
+        
+        print("✓ BirdNET Server Kommando verfügbar")
+        
+        # Erstelle Upload-Ordner falls nicht vorhanden
+        os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+        print(f"✓ Upload-Ordner erstellt: {app.config['UPLOAD_FOLDER']}")
+        
+        # Starte BirdNET Server
+        print(f"Starte BirdNET Server auf {BIRDNET_HOST}:{BIRDNET_PORT}")
         birdnet_server = subprocess.Popen([
             'python', '-m', 'birdnet_analyzer.server',
             '--host', BIRDNET_HOST,
             '--port', str(BIRDNET_PORT),
-            '--spath', app.config['UPLOAD_FOLDER']
+            '--spath', app.config['UPLOAD_FOLDER'],
+            '-t', '1'  # Nur 1 Thread für weniger Ressourcenbedarf
         ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, universal_newlines=True)
         
-        print(f"BirdNET Server Prozess gestartet (PID: {birdnet_server.pid})")
+        print(f"✓ BirdNET Server Prozess gestartet (PID: {birdnet_server.pid})")
         
-        # Warte bis Server bereit ist mit besseren Logs
-        for i in range(60):  # 60 Sekunden timeout
+        # Warte bis Server bereit ist
+        for i in range(90):  # 90 Sekunden timeout für Render
+            # Prüfe ob Prozess noch läuft
             if birdnet_server.poll() is not None:
-                # Prozess ist beendet
-                stdout, stderr = birdnet_server.communicate()
-                print(f"BirdNET Server Prozess beendet. Output: {stdout}")
+                print("❌ BirdNET Server Prozess ist unerwartet beendet")
+                try:
+                    stdout_data = birdnet_server.stdout.read()
+                    print(f"Server Output: {stdout_data}")
+                except:
+                    pass
                 return False
                 
             try:
-                response = requests.get(f'http://{BIRDNET_HOST}:{BIRDNET_PORT}', timeout=2)
+                print(f"Teste Verbindung zu BirdNET Server... ({i+1}/90)")
+                response = requests.get(f'http://{BIRDNET_HOST}:{BIRDNET_PORT}', timeout=3)
                 if response.status_code == 200:
-                    print(f"BirdNET Server erfolgreich gestartet auf {BIRDNET_HOST}:{BIRDNET_PORT}")
+                    print(f"✅ BirdNET Server erfolgreich gestartet auf {BIRDNET_HOST}:{BIRDNET_PORT}")
                     return True
             except requests.exceptions.RequestException as e:
-                if i % 10 == 0:  # Alle 10 Sekunden loggen
-                    print(f"Warte auf BirdNET Server... ({i}/60 Sekunden)")
+                if i % 15 == 0:  # Alle 15 Sekunden detailliertes Log
+                    print(f"Warte auf BirdNET Server... ({i}/90 Sekunden) - {e}")
                 time.sleep(1)
         
-        # Timeout erreicht - prüfe Server-Output
+        print("❌ Timeout beim Warten auf BirdNET Server")
+        
+        # Lese Server-Output für Debugging
         if birdnet_server.poll() is None:
-            print("BirdNET Server läuft noch, aber antwortet nicht auf HTTP-Requests")
-            # Lese verfügbare Ausgabe
-            try:
-                stdout_data = birdnet_server.stdout.read(1024)
-                if stdout_data:
-                    print(f"BirdNET Server Output: {stdout_data}")
-            except:
-                pass
+            print("Server läuft noch, antwortet aber nicht")
         else:
-            stdout, stderr = birdnet_server.communicate()
-            print(f"BirdNET Server beendet sich. Output: {stdout}")
+            print("Server ist beendet")
+            
+        try:
+            stdout_data = birdnet_server.stdout.read(2048)
+            if stdout_data:
+                print(f"Server Output: {stdout_data}")
+        except Exception as e:
+            print(f"Konnte Server Output nicht lesen: {e}")
         
         return False
         
     except Exception as e:
-        print(f"Fehler beim Starten des BirdNET Servers: {e}")
+        print(f"❌ Kritischer Fehler beim Starten des BirdNET Servers: {e}")
         import traceback
         print(f"Traceback: {traceback.format_exc()}")
         return False
@@ -743,31 +771,19 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     print(f"Flask App wird auf Port {port} gestartet")
     
-    # Starte Flask App zuerst (für Render Port Detection)
-    def run_flask():
-        app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    # Versuche BirdNET Server zu starten (im Hintergrund)
+    def start_birdnet_async():
+        print("Starting BirdNET server...")
+        success = start_birdnet_server()
+        if success:
+            print("✅ BirdNET Server erfolgreich gestartet!")
+        else:
+            print("❌ BirdNET Server Start fehlgeschlagen!")
     
-    # Flask in separatem Thread starten
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
+    # BirdNET Server in separatem Thread starten
+    birdnet_thread = threading.Thread(target=start_birdnet_async, daemon=True)
+    birdnet_thread.start()
     
-    # Kurz warten bis Flask läuft
-    time.sleep(2)
-    print(f"Flask App läuft auf Port {port}")
-    
-    # Dann BirdNET Server starten
-    print("Starte BirdNET Server...")
-    birdnet_success = start_birdnet_server()
-    
-    if not birdnet_success:
-        print("WARNUNG: BirdNET Server konnte nicht gestartet werden!")
-        print("App läuft trotzdem - nur Analyse-Funktion ist nicht verfügbar")
-    
-    # Hauptthread am Leben halten
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("Beende App...")
-        stop_birdnet_server()
-        sys.exit(0)
+    # Flask Server starten (Hauptthread)
+    print("Starting Flask server on port", port)
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
