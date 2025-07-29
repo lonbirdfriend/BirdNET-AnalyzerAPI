@@ -1,6 +1,6 @@
 flask
 gunicorn
-birdnet
+birdnetlib
 requests
 numpy
 scipy
