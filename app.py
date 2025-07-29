@@ -27,30 +27,67 @@ def start_birdnet_server():
     """Startet den BirdNET Analyzer Server im Hintergrund"""
     global birdnet_server
     try:
-        # Starte BirdNET Server
+        print("Versuche BirdNET Server zu starten...")
+        
+        # Teste erst ob birdnet_analyzer verfügbar ist
+        test_result = subprocess.run([
+            'python', '-c', 'import birdnet_analyzer; print("BirdNET Analyzer gefunden")'
+        ], capture_output=True, text=True, timeout=10)
+        
+        if test_result.returncode != 0:
+            print(f"BirdNET Analyzer Import-Fehler: {test_result.stderr}")
+            return False
+        
+        print(test_result.stdout.strip())
+        
+        # Starte BirdNET Server mit erweiterten Logs
         birdnet_server = subprocess.Popen([
             'python', '-m', 'birdnet_analyzer.server',
             '--host', BIRDNET_HOST,
             '--port', str(BIRDNET_PORT),
-            '--spath', app.config['UPLOAD_FOLDER'],
-            '--locale', 'de'
-        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            '--spath', app.config['UPLOAD_FOLDER']
+        ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, universal_newlines=True)
         
-        # Warte bis Server bereit ist
-        for i in range(30):  # 30 Sekunden timeout
+        print(f"BirdNET Server Prozess gestartet (PID: {birdnet_server.pid})")
+        
+        # Warte bis Server bereit ist mit besseren Logs
+        for i in range(60):  # 60 Sekunden timeout
+            if birdnet_server.poll() is not None:
+                # Prozess ist beendet
+                stdout, stderr = birdnet_server.communicate()
+                print(f"BirdNET Server Prozess beendet. Output: {stdout}")
+                return False
+                
             try:
-                response = requests.get(f'http://{BIRDNET_HOST}:{BIRDNET_PORT}', timeout=1)
+                response = requests.get(f'http://{BIRDNET_HOST}:{BIRDNET_PORT}', timeout=2)
                 if response.status_code == 200:
                     print(f"BirdNET Server erfolgreich gestartet auf {BIRDNET_HOST}:{BIRDNET_PORT}")
                     return True
-            except:
+            except requests.exceptions.RequestException as e:
+                if i % 10 == 0:  # Alle 10 Sekunden loggen
+                    print(f"Warte auf BirdNET Server... ({i}/60 Sekunden)")
                 time.sleep(1)
         
-        print("BirdNET Server konnte nicht gestartet werden")
+        # Timeout erreicht - prüfe Server-Output
+        if birdnet_server.poll() is None:
+            print("BirdNET Server läuft noch, aber antwortet nicht auf HTTP-Requests")
+            # Lese verfügbare Ausgabe
+            try:
+                stdout_data = birdnet_server.stdout.read(1024)
+                if stdout_data:
+                    print(f"BirdNET Server Output: {stdout_data}")
+            except:
+                pass
+        else:
+            stdout, stderr = birdnet_server.communicate()
+            print(f"BirdNET Server beendet sich. Output: {stdout}")
+        
         return False
         
     except Exception as e:
         print(f"Fehler beim Starten des BirdNET Servers: {e}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
         return False
 
 def stop_birdnet_server():
@@ -80,6 +117,10 @@ def index():
 def analyze_audio():
     """Analysiert hochgeladene Audiodatei mit BirdNET"""
     try:
+        # Prüfe ob BirdNET Server läuft
+        if birdnet_server is None or birdnet_server.poll() is not None:
+            return jsonify({'error': 'BirdNET Server ist nicht verfügbar. Bitte versuchen Sie es später erneut.'}), 503
+        
         if 'audio' not in request.files:
             return jsonify({'error': 'Keine Audiodatei gefunden'}), 400
         
@@ -119,7 +160,7 @@ def analyze_audio():
                 f'http://{BIRDNET_HOST}:{BIRDNET_PORT}',
                 files=files,
                 data=data,
-                timeout=30
+                timeout=60  # Längerer Timeout für Analyse
             )
             
             if response.status_code == 200:
@@ -153,7 +194,7 @@ def analyze_audio():
                 else:
                     return jsonify({'error': f'BirdNET Fehler: {result.get("msg", "Unbekannter Fehler")}'}), 500
             else:
-                return jsonify({'error': f'Server Fehler: {response.status_code}'}), 500
+                return jsonify({'error': f'Server Fehler: {response.status_code} - {response.text}'}), 500
                 
         finally:
             # Temporäre Datei löschen
@@ -164,6 +205,8 @@ def analyze_audio():
                 
     except Exception as e:
         print(f"Fehler bei der Analyse: {e}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
         return jsonify({'error': f'Analyse-Fehler: {str(e)}'}), 500
 
 @app.route('/health')
@@ -692,15 +735,39 @@ def create_template():
 
 if __name__ == '__main__':
     # Erstelle statische Dateien und Templates
+    print("Erstelle statische Dateien...")
     create_static_files()
     create_template()
     
-    # Starte BirdNET Server
-    print("Starte BirdNET Server...")
-    if not start_birdnet_server():
-        print("FEHLER: BirdNET Server konnte nicht gestartet werden!")
-        sys.exit(1)
-    
-    # Starte Flask App
+    # Port für Render
     port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    print(f"Flask App wird auf Port {port} gestartet")
+    
+    # Starte Flask App zuerst (für Render Port Detection)
+    def run_flask():
+        app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    
+    # Flask in separatem Thread starten
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    
+    # Kurz warten bis Flask läuft
+    time.sleep(2)
+    print(f"Flask App läuft auf Port {port}")
+    
+    # Dann BirdNET Server starten
+    print("Starte BirdNET Server...")
+    birdnet_success = start_birdnet_server()
+    
+    if not birdnet_success:
+        print("WARNUNG: BirdNET Server konnte nicht gestartet werden!")
+        print("App läuft trotzdem - nur Analyse-Funktion ist nicht verfügbar")
+    
+    # Hauptthread am Leben halten
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("Beende App...")
+        stop_birdnet_server()
+        sys.exit(0)
