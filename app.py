@@ -1,14 +1,10 @@
 import os
-import threading
-import time
 import tempfile
-import requests
 import json
-import subprocess
 from flask import Flask, render_template, request, jsonify, send_from_directory
 from werkzeug.utils import secure_filename
-import signal
-import sys
+import numpy as np
+from pathlib import Path
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'uploads'
@@ -18,67 +14,23 @@ app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 os.makedirs('static', exist_ok=True)
 
-# Global variable für BirdNET Server Process
-birdnet_server = None
-BIRDNET_HOST = '127.0.0.1'
-BIRDNET_PORT = 8080
-
-def start_birdnet_server():
-    """Startet den BirdNET Analyzer Server im Hintergrund"""
-    global birdnet_server
-    try:
-        # Starte BirdNET Server
-        birdnet_server = subprocess.Popen([
-            'python', '-m', 'birdnet_analyzer.server',
-            '--host', BIRDNET_HOST,
-            '--port', str(BIRDNET_PORT),
-            '--spath', app.config['UPLOAD_FOLDER'],
-            '-l', 'de'
-        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        
-        # Warte bis Server bereit ist
-        for i in range(30):  # 30 Sekunden timeout
-            try:
-                response = requests.get(f'http://{BIRDNET_HOST}:{BIRDNET_PORT}', timeout=1)
-                if response.status_code == 200:
-                    print(f"BirdNET Server erfolgreich gestartet auf {BIRDNET_HOST}:{BIRDNET_PORT}")
-                    return True
-            except:
-                time.sleep(1)
-        
-        print("BirdNET Server konnte nicht gestartet werden")
-        return False
-        
-    except Exception as e:
-        print(f"Fehler beim Starten des BirdNET Servers: {e}")
-        return False
-
-def stop_birdnet_server():
-    """Stoppt den BirdNET Server"""
-    global birdnet_server
-    if birdnet_server:
-        birdnet_server.terminate()
-        birdnet_server.wait()
-        birdnet_server = None
-
-def signal_handler(sig, frame):
-    """Handler für sauberes Beenden"""
-    print("Beende BirdNET Server...")
-    stop_birdnet_server()
-    sys.exit(0)
-
-# Signal Handler registrieren
-signal.signal(signal.SIGINT, signal_handler)
-signal.signal(signal.SIGTERM, signal_handler)
-
-@app.route('/')
-def index():
-    """Hauptseite mit Audio-Recorder"""
-    return render_template('index.html')
+# BirdNET Model laden
+try:
+    from birdnet.models import ModelV2M4
+    model = ModelV2M4()
+    BIRDNET_AVAILABLE = True
+    print("BirdNET Model erfolgreich geladen")
+except ImportError as e:
+    print(f"BirdNET Import Fehler: {e}")
+    BIRDNET_AVAILABLE = False
+    model = None
 
 @app.route('/analyze', methods=['POST'])
 def analyze_audio():
     """Analysiert hochgeladene Audiodatei mit BirdNET"""
+    if not BIRDNET_AVAILABLE or model is None:
+        return jsonify({'error': 'BirdNET Model nicht verfügbar'}), 500
+    
     try:
         if 'audio' not in request.files:
             return jsonify({'error': 'Keine Audiodatei gefunden'}), 400
@@ -88,8 +40,8 @@ def analyze_audio():
             return jsonify({'error': 'Keine Datei ausgewählt'}), 400
         
         # Standortdaten aus dem Request
-        lat = request.form.get('lat', -1)
-        lon = request.form.get('lon', -1)
+        lat = float(request.form.get('lat', -1))
+        lon = float(request.form.get('lon', -1))
         
         # Temporäre Datei speichern
         with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
@@ -97,63 +49,67 @@ def analyze_audio():
             temp_filename = temp_file.name
         
         try:
-            # Metadata für BirdNET vorbereiten
-            metadata = {
-                'lat': float(lat) if lat != '-1' else -1,
-                'lon': float(lon) if lon != '-1' else -1,
-                'week': -1,  # Ganzjährig
-                'sensitivity': 1.0,
-                'overlap': 0,
-                'sf_thresh': 0.03
-            }
+            # Audio-Datei analysieren
+            audio_path = Path(temp_filename)
             
-            # Audio-Datei lesen
-            with open(temp_filename, 'rb') as f:
-                audio_data = f.read()
+            # Spezies für Standort vorhersagen (falls Koordinaten verfügbar)
+            species_filter = None
+            if lat != -1 and lon != -1:
+                try:
+                    # Aktuelle Woche berechnen (ungefähr)
+                    import datetime
+                    week = datetime.datetime.now().isocalendar()[1] // 4 + 1
+                    week = min(48, max(1, week))  # BirdNET verwendet 1-48
+                    
+                    species_in_area = model.predict_species_at_location_and_time(lat, lon, week=week)
+                    species_filter = set(species_in_area.keys()) if species_in_area else None
+                    print(f"Gefiltert nach {len(species_filter) if species_filter else 0} lokalen Arten")
+                except Exception as e:
+                    print(f"Standortfilter Fehler: {e}")
+                    species_filter = None
             
-            # Request an BirdNET Server senden
-            files = {'audio': ('recording.wav', audio_data, 'audio/wav')}
-            data = {'meta': json.dumps(metadata)}
+            # Audio analysieren
+            if species_filter:
+                predictions = model.predict_species_within_audio_file(
+                    audio_path,
+                    filter_species=species_filter
+                )
+            else:
+                predictions = model.predict_species_within_audio_file(audio_path)
             
-            response = requests.post(
-                f'http://{BIRDNET_HOST}:{BIRDNET_PORT}',
-                files=files,
-                data=data,
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                
-                if result.get('msg') == 'success':
-                    # Ergebnisse formatieren
-                    birds = []
-                    for bird_data in result.get('results', []):
-                        species_name = bird_data[0]
-                        confidence = bird_data[1]
-                        
-                        # Deutschen und wissenschaftlichen Namen trennen
+            # Ergebnisse verarbeiten
+            birds = []
+            for time_interval, species_predictions in predictions.items():
+                for species_name, confidence in species_predictions.items():
+                    if confidence > 0.1:  # Mindestkonfidenzniveau
+                        # Namen aufteilen (wissenschaftlich_deutscher Name)
                         if '_' in species_name:
                             scientific, common = species_name.split('_', 1)
                         else:
                             scientific = species_name
                             common = species_name
                         
-                        birds.append({
-                            'scientific_name': scientific,
-                            'common_name': common,
-                            'confidence': round(confidence * 100, 1)
-                        })
-                    
-                    return jsonify({
-                        'success': True,
-                        'birds': birds,
-                        'location_used': lat != '-1' and lon != '-1'
-                    })
-                else:
-                    return jsonify({'error': f'BirdNET Fehler: {result.get("msg", "Unbekannter Fehler")}'}), 500
-            else:
-                return jsonify({'error': f'Server Fehler: {response.status_code}'}), 500
+                        # Prüfen ob Vogel schon in Liste
+                        existing_bird = next((b for b in birds if b['scientific_name'] == scientific), None)
+                        if existing_bird:
+                            # Höhere Konfidenz behalten
+                            if confidence > existing_bird['confidence'] / 100:
+                                existing_bird['confidence'] = round(confidence * 100, 1)
+                        else:
+                            birds.append({
+                                'scientific_name': scientific,
+                                'common_name': common,
+                                'confidence': round(confidence * 100, 1)
+                            })
+            
+            # Nach Konfidenz sortieren
+            birds.sort(key=lambda x: x['confidence'], reverse=True)
+            
+            return jsonify({
+                'success': True,
+                'birds': birds[:10],  # Top 10 Ergebnisse
+                'location_used': lat != -1 and lon != -1
+            })
                 
         finally:
             # Temporäre Datei löschen
@@ -164,17 +120,22 @@ def analyze_audio():
                 
     except Exception as e:
         print(f"Fehler bei der Analyse: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': f'Analyse-Fehler: {str(e)}'}), 500
+
+@app.route('/')
+def index():
+    """Hauptseite mit Audio-Recorder"""
+    return render_template('index.html')
 
 @app.route('/health')
 def health():
     """Health Check Endpoint für Render"""
-    try:
-        # Prüfe ob BirdNET Server läuft
-        response = requests.get(f'http://{BIRDNET_HOST}:{BIRDNET_PORT}', timeout=2)
-        return jsonify({'status': 'healthy', 'birdnet_server': 'running'})
-    except:
-        return jsonify({'status': 'unhealthy', 'birdnet_server': 'not running'}), 503
+    return jsonify({
+        'status': 'healthy', 
+        'birdnet_available': BIRDNET_AVAILABLE
+    })
 
 @app.route('/static/<filename>')
 def static_files(filename):
@@ -695,11 +656,8 @@ if __name__ == '__main__':
     create_static_files()
     create_template()
     
-    # Starte BirdNET Server
-    print("Starte BirdNET Server...")
-    if not start_birdnet_server():
-        print("FEHLER: BirdNET Server konnte nicht gestartet werden!")
-        sys.exit(1)
+    if not BIRDNET_AVAILABLE:
+        print("WARNUNG: BirdNET Analyzer nicht verfügbar!")
     
     # Starte Flask App
     port = int(os.environ.get('PORT', 10000))
