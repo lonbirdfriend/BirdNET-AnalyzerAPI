@@ -1,8 +1,10 @@
 flask
 gunicorn
-birdnetlib
-requests
+tensorflow>=2.3.0
+librosa
 numpy
 scipy
-librosa
-bottle
+requests
+resampy
+soundfile
+birdnetlib
