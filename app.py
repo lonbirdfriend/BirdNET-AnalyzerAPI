@@ -48,7 +48,12 @@ HTML_TEMPLATE = """
         
         <button id="recordBtn" class="record disabled" disabled>🎤 Aufnahme starten</button>
         <button onclick="testBirdNet()" style="margin-left: 10px; padding: 10px;">🧪 BirdNET Test</button>
-        <button onclick="testExternalMp3()" style="margin-left: 10px; padding: 10px;">🎵 MP3 Test</button>
+        
+        <div style="margin: 20px 0;">
+            <input type="file" id="audioFile" accept="audio/*" style="display: none;">
+            <button onclick="document.getElementById('audioFile').click()" style="padding: 10px;">📁 Audio-Datei hochladen</button>
+            <span id="fileName" style="margin-left: 10px; color: #666;"></span>
+        </div>
         
         <div id="status">Initialisiere...</div>
         <div id="results" class="results"></div>
@@ -110,6 +115,23 @@ HTML_TEMPLATE = """
                 status.textContent = 'MP3 Test Fehler: ' + error.message;
             }
         };
+        
+        // File Upload Handler
+        document.getElementById('audioFile').addEventListener('change', async function(event) {
+            const file = event.target.files[0];
+            if (file) {
+                document.getElementById('fileName').textContent = file.name;
+                status.textContent = `Analysiere ${file.name}...`;
+                console.log(`📁 Datei ausgewählt: ${file.name}, ${file.size} bytes, ${file.type}`);
+                
+                try {
+                    await uploadAudio(file);
+                } catch (error) {
+                    console.error('❌ File Upload Fehler:', error);
+                    status.textContent = 'Upload Fehler: ' + error.message;
+                }
+            }
+        });
 
         // WebM zu WAV konvertieren (KORRIGIERT)
         async function convertToWav(webmBlob) {
@@ -218,7 +240,8 @@ HTML_TEMPLATE = """
 
                 // FormData erstellen
                 const formData = new FormData();
-                formData.append('audio', audioBlob, audioBlob.type.includes('mp3') ? 'recording.mp3' : 'recording.webm');
+                const filename = audioBlob.name || (audioBlob.type.includes('mp3') ? 'recording.mp3' : 'recording.webm');
+                formData.append('audio', audioBlob, filename);
                 formData.append('lat', lat);
                 formData.append('lon', lon);
 
@@ -461,8 +484,19 @@ def analyze():
         
         print(f"🌍 GPS: {lat}, {lon}")
         
-        # Temporär speichern mit korrekter Endung
-        file_extension = '.mp3' if 'mp3' in audio_file.content_type else '.webm'
+        # Temporär speichern mit korrekter Endung basierend auf Dateiname
+        filename = audio_file.filename or 'audio'
+        if filename.endswith('.mp3'):
+            file_extension = '.mp3'
+        elif filename.endswith('.wav'):
+            file_extension = '.wav'
+        elif filename.endswith('.flac'):
+            file_extension = '.flac'
+        elif filename.endswith('.ogg'):
+            file_extension = '.ogg'
+        else:
+            file_extension = '.webm'  # Default
+            
         with tempfile.NamedTemporaryFile(suffix=file_extension, delete=False) as tmp:
             audio_file.save(tmp.name)
             print(f"💾 Gespeichert in: {tmp.name}")
