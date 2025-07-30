@@ -48,7 +48,7 @@ HTML_TEMPLATE = """
         
         <button id="recordBtn" class="record disabled" disabled>🎤 Aufnahme starten</button>
         <button onclick="testBirdNet()" style="margin-left: 10px; padding: 10px;">🧪 BirdNET Test</button>
-        <button onclick="testUpload()" style="margin-left: 10px; padding: 10px;">📤 Upload Test</button>
+        <button onclick="testExternalMp3()" style="margin-left: 10px; padding: 10px;">🎵 MP3 Test</button>
         
         <div id="status">Initialisiere...</div>
         <div id="results" class="results"></div>
@@ -68,7 +68,7 @@ HTML_TEMPLATE = """
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
                 mediaRecorder = new MediaRecorder(stream, {
-                    mimeType: 'audio/webm'  // WebM aufnehmen, dann zu WAV konvertieren
+                    mimeType: 'audio/webm;codecs=opus'  // WebM verwenden, aber DIREKT senden
                 });
                 
                 mediaRecorder.ondataavailable = event => {
@@ -78,11 +78,9 @@ HTML_TEMPLATE = """
                 mediaRecorder.onstop = async () => {
                     const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
                     
-                    // Konvertiere WebM zu WAV
-                    console.log('🔄 Konvertiere WebM zu WAV...');
-                    const wavBlob = await convertToWav(audioBlob);
-                    
-                    await uploadAudio(wavBlob);
+                    // DIREKT WebM senden - kein WAV mehr!
+                    console.log('📤 Sende WebM direkt (ohne Konvertierung)');
+                    await uploadAudio(audioBlob);
                     audioChunks = [];
                 };
                 
@@ -94,6 +92,24 @@ HTML_TEMPLATE = """
                 status.textContent = 'Mikrofon-Zugriff verweigert: ' + error.message;
             }
         }
+
+        // TEST: Externe MP3 laden und senden
+        window.testExternalMp3 = async function() {
+            console.log('🎵 Teste externe MP3...');
+            status.textContent = 'Lade externe MP3...';
+            try {
+                // Lade die Xeno-Canto MP3
+                const response = await fetch('https://xeno-canto.org/487496/download');
+                const audioBlob = await response.blob();
+                
+                console.log(`🎵 MP3 geladen: ${audioBlob.size} bytes`);
+                await uploadAudio(audioBlob);
+                
+            } catch (error) {
+                console.error('❌ MP3 Test Fehler:', error);
+                status.textContent = 'MP3 Test Fehler: ' + error.message;
+            }
+        };
 
         // WebM zu WAV konvertieren (KORRIGIERT)
         async function convertToWav(webmBlob) {
@@ -202,7 +218,7 @@ HTML_TEMPLATE = """
 
                 // FormData erstellen
                 const formData = new FormData();
-                formData.append('audio', audioBlob, 'recording.wav');  // Als WAV hochladen
+                formData.append('audio', audioBlob, audioBlob.type.includes('mp3') ? 'recording.mp3' : 'recording.webm');
                 formData.append('lat', lat);
                 formData.append('lon', lon);
 
@@ -445,8 +461,9 @@ def analyze():
         
         print(f"🌍 GPS: {lat}, {lon}")
         
-        # Temporär speichern
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
+        # Temporär speichern mit korrekter Endung
+        file_extension = '.mp3' if 'mp3' in audio_file.content_type else '.webm'
+        with tempfile.NamedTemporaryFile(suffix=file_extension, delete=False) as tmp:
             audio_file.save(tmp.name)
             print(f"💾 Gespeichert in: {tmp.name}")
             
