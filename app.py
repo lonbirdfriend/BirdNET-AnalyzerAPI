@@ -302,15 +302,17 @@ HTML_TEMPLATE = """
             console.log('📤 Teste Upload...');
             status.textContent = 'Teste Upload...';
             try {
-                // Erstelle kleine Test-Datei
-                const testData = new Blob(['test'], { type: 'audio/wav' });
+                // Erstelle größere Test-Datei (ähnlich Audio-Größe)
+                const largeData = new Uint8Array(500000);  // 500KB wie Audio
+                const testBlob = new Blob([largeData], { type: 'audio/wav' });
                 const formData = new FormData();
-                formData.append('audio', testData, 'test.wav');
+                formData.append('audio', testBlob, 'test.wav');
                 formData.append('lat', '50.0');
                 formData.append('lon', '8.0');
                 
-                console.log('📤 Sende Test-Upload...');
-                const response = await fetch('/test-upload', {
+                console.log(`📤 Sende Test-Upload (${testBlob.size} bytes)...`);
+                
+                const response = await fetch('/analyze', {  // Teste direkt /analyze
                     method: 'POST',
                     body: formData
                 });
@@ -325,6 +327,7 @@ HTML_TEMPLATE = """
             } catch (error) {
                 console.error('❌ Upload Test Fehler:', error);
                 status.textContent = 'Upload Test Fehler: ' + error.message;
+                results.innerHTML = `<div style="color: red;">FEHLER: ${error.message}</div>`;
             }
         };
     </script>
