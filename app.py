@@ -95,21 +95,24 @@ HTML_TEMPLATE = """
             }
         }
 
-        // WebM zu WAV konvertieren
+        // WebM zu WAV konvertieren (KORRIGIERT)
         async function convertToWav(webmBlob) {
             try {
                 const arrayBuffer = await webmBlob.arrayBuffer();
                 const audioContext = new (window.AudioContext || window.webkitAudioContext)();
                 const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
                 
-                // WAV-Header erstellen
+                // Audio-Parameter
                 const length = audioBuffer.length;
-                const numberOfChannels = audioBuffer.numberOfChannels;
-                const sampleRate = audioBuffer.sampleRate;
-                const arrayBuffer2 = new ArrayBuffer(44 + length * numberOfChannels * 2);
+                const numberOfChannels = 1; // Mono für BirdNET
+                const sampleRate = 44100;   // Standard Sample Rate
+                const bytesPerSample = 2;   // 16-bit
+                
+                // WAV Buffer erstellen
+                const arrayBuffer2 = new ArrayBuffer(44 + length * numberOfChannels * bytesPerSample);
                 const view = new DataView(arrayBuffer2);
                 
-                // WAV Header schreiben
+                // WAV Header schreiben (korrekt!)
                 function writeString(offset, string) {
                     for (let i = 0; i < string.length; i++) {
                         view.setUint8(offset + i, string.charCodeAt(i));
@@ -117,37 +120,37 @@ HTML_TEMPLATE = """
                 }
                 
                 let offset = 0;
+                
+                // RIFF Header
                 writeString(offset, 'RIFF'); offset += 4;
-                view.setUint32(offset, 36 + length * numberOfChannels * 2, true); offset += 4;
+                view.setUint32(offset, 36 + length * numberOfChannels * bytesPerSample, true); offset += 4;
                 writeString(offset, 'WAVE'); offset += 4;
+                
+                // fmt Chunk
                 writeString(offset, 'fmt '); offset += 4;
-                view.setUint32(offset, 16, true); offset += 4;
-                view.setUint16(offset, 1, true); offset += 2; // PCM
-                view.setUint16(offset, numberOfChannels, true); offset += 2;
-                view.setUint32(offset, sampleRate, true); offset += 4;
-                view.setUint32(offset, sampleRate * numberOfChannels * 2, true); offset += 4;
-                view.setUint16(offset, numberOfChannels * 2, true); offset += 2;
-                view.setUint16(offset, 16, true); offset += 2;
+                view.setUint32(offset, 16, true); offset += 4;                    // Subchunk1Size
+                view.setUint16(offset, 1, true); offset += 2;                     // AudioFormat (PCM)
+                view.setUint16(offset, numberOfChannels, true); offset += 2;      // NumChannels
+                view.setUint32(offset, sampleRate, true); offset += 4;            // SampleRate
+                view.setUint32(offset, sampleRate * numberOfChannels * bytesPerSample, true); offset += 4; // ByteRate
+                view.setUint16(offset, numberOfChannels * bytesPerSample, true); offset += 2; // BlockAlign
+                view.setUint16(offset, 16, true); offset += 2;                    // BitsPerSample
+                
+                // data Chunk
                 writeString(offset, 'data'); offset += 4;
-                view.setUint32(offset, length * numberOfChannels * 2, true); offset += 4;
+                view.setUint32(offset, length * numberOfChannels * bytesPerSample, true); offset += 4;
                 
-                // Audio-Daten schreiben
-                const channels = [];
-                for (let i = 0; i < numberOfChannels; i++) {
-                    channels.push(audioBuffer.getChannelData(i));
+                // Audio-Daten schreiben (MONO!)
+                const inputData = audioBuffer.getChannelData(0); // Nur erster Kanal
+                
+                for (let i = 0; i < length; i++) {
+                    const sample = Math.max(-1, Math.min(1, inputData[i]));
+                    const intSample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+                    view.setInt16(offset, intSample, true);
+                    offset += 2;
                 }
                 
-                let sampleIndex = 0;
-                while (sampleIndex < length) {
-                    for (let channel = 0; channel < numberOfChannels; channel++) {
-                        const sample = Math.max(-1, Math.min(1, channels[channel][sampleIndex]));
-                        view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
-                        offset += 2;
-                    }
-                    sampleIndex++;
-                }
-                
-                console.log('✅ WAV konvertiert:', arrayBuffer2.byteLength, 'bytes');
+                console.log('✅ WAV konvertiert:', arrayBuffer2.byteLength, 'bytes, Mono, 44.1kHz');
                 return new Blob([arrayBuffer2], { type: 'audio/wav' });
                 
             } catch (error) {
