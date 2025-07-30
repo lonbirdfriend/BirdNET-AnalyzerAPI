@@ -47,6 +47,8 @@ HTML_TEMPLATE = """
         <p><small>⚠️ Beim ersten Request kann es 30-60 Sekunden dauern (Server erwacht aus Standby)</small></p>
         
         <button id="recordBtn" class="record disabled" disabled>🎤 Aufnahme starten</button>
+        <button onclick="testBirdNet()" style="margin-left: 10px; padding: 10px;">🧪 BirdNET Test</button>
+        <button onclick="testUpload()" style="margin-left: 10px; padding: 10px;">📤 Upload Test</button>
         
         <div id="status">Initialisiere...</div>
         <div id="results" class="results"></div>
@@ -279,6 +281,52 @@ HTML_TEMPLATE = """
                 console.log('❌ Keep-alive failed');
             }
         }, 300000);  // 5 Minuten
+        
+        // Test-Funktionen
+        window.testBirdNet = async function() {
+            console.log('🧪 Teste BirdNET...');
+            status.textContent = 'Teste BirdNET...';
+            try {
+                const response = await fetch('/test-birdnet');
+                const data = await response.json();
+                console.log('🧪 BirdNET Test Resultat:', data);
+                status.textContent = 'BirdNET Test: ' + (data.success ? 'OK' : 'FEHLER');
+                results.innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+            } catch (error) {
+                console.error('❌ BirdNET Test Fehler:', error);
+                status.textContent = 'BirdNET Test Fehler: ' + error.message;
+            }
+        };
+        
+        window.testUpload = async function() {
+            console.log('📤 Teste Upload...');
+            status.textContent = 'Teste Upload...';
+            try {
+                // Erstelle kleine Test-Datei
+                const testData = new Blob(['test'], { type: 'audio/wav' });
+                const formData = new FormData();
+                formData.append('audio', testData, 'test.wav');
+                formData.append('lat', '50.0');
+                formData.append('lon', '8.0');
+                
+                console.log('📤 Sende Test-Upload...');
+                const response = await fetch('/test-upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                console.log('📥 Upload Test Response:', response.status);
+                const data = await response.json();
+                console.log('📊 Upload Test Data:', data);
+                
+                status.textContent = 'Upload Test: ' + (data.success ? 'OK' : 'FEHLER');
+                results.innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+                
+            } catch (error) {
+                console.error('❌ Upload Test Fehler:', error);
+                status.textContent = 'Upload Test Fehler: ' + error.message;
+            }
+        };
     </script>
 </body>
 </html>
@@ -366,7 +414,11 @@ def test_upload():
 
 @app.route('/analyze', methods=['POST'])
 def analyze():
-    print("🔍 Analyze-Request erhalten")
+    print("🔍 ===== ANALYZE REQUEST EMPFANGEN =====")
+    print(f"📊 Request Method: {request.method}")
+    print(f"📁 Files: {list(request.files.keys())}")
+    print(f"📝 Form: {list(request.form.keys())}")
+    print("=" * 50)
     
     if not analyzer:
         print("❌ BirdNET Analyzer nicht verfügbar")
