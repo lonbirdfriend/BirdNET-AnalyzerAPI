@@ -499,20 +499,33 @@ def analyze():
             
         with tempfile.NamedTemporaryFile(suffix=file_extension, delete=False) as tmp:
             audio_file.save(tmp.name)
-            print(f"💾 Gespeichert in: {tmp.name}")
+            print(f"📁 Verwende Datei: {tmp.name} (Extension: {file_extension})")
             
-            # BirdNET analysieren
-            kwargs = {'min_conf': 0.1}
+            # BirdNET Recording exakt wie im Beispiel erstellen
+            recording_kwargs = {'min_conf': 0.1}
             if lat != -1 and lon != -1:
-                kwargs['lat'] = lat
-                kwargs['lon'] = lon
-                kwargs['date'] = datetime.now()
-                print("📍 Verwende GPS-Daten")
+                recording_kwargs['lat'] = lat
+                recording_kwargs['lon'] = lon
+                recording_kwargs['date'] = datetime.now()
+                print(f"📍 GPS Parameter: lat={lat}, lon={lon}")
             
-            print("🤖 Starte BirdNET Analyse...")
-            recording = Recording(analyzer, tmp.name, **kwargs)
+            print(f"🤖 Erstelle Recording mit: {recording_kwargs}")
+            recording = Recording(
+                analyzer,
+                tmp.name,
+                **recording_kwargs
+            )
+            print("🤖 Rufe recording.analyze() auf...")
             recording.analyze()
-            print(f"✅ Analyse fertig: {len(recording.detections)} Erkennungen")
+            print(f"✅ recording.analyze() abgeschlossen!")
+            print(f"📊 Anzahl Detections: {len(recording.detections)}")
+            
+            # Debug: Zeige erste paar Detections  
+            for i, detection in enumerate(recording.detections[:3]):
+                print(f"  Detection {i+1}: {detection}")
+            
+            if len(recording.detections) == 0:
+                print("⚠️ Keine Detections gefunden - das ist normal bei Stille oder schlechter Audio-Qualität")
             
             # Ergebnisse formatieren
             birds = []
